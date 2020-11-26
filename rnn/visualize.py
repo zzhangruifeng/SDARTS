@@ -28,7 +28,7 @@ def plot(genotype, filename):
   for i in range(1, steps + 1):
     g.edge(str(i), "h_{t}", fillcolor="gray")
 
-  g.render(filename, view=True)
+  g.render(filename, view=False)
 
 
 if __name__ == '__main__':
@@ -43,5 +43,6 @@ if __name__ == '__main__':
     print("{} is not specified in genotypes.py".format(genotype_name)) 
     sys.exit(1)
 
-  plot(genotype.recurrent, "recurrent")
+  path = '../../fig/genotypes/rnn/'
+  plot(genotype.recurrent, path + genotype_name)
 

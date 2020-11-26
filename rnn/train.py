@@ -19,7 +19,7 @@ from torch.autograd import Variable
 from utils import batchify, get_batch, repackage_hidden, create_exp_dir, save_checkpoint
 
 parser = argparse.ArgumentParser(description='PyTorch PennTreeBank/WikiText2 Language Model')
-parser.add_argument('--data', type=str, default='../data/penn/',
+parser.add_argument('--data', type=str, default='../../data/penn/',
                     help='location of the data corpus')
 parser.add_argument('--emsize', type=int, default=850,
                     help='size of word embeddings')
@@ -83,7 +83,9 @@ if args.small_batch_size < 0:
     args.small_batch_size = args.batch_size
 
 if not args.continue_train:
-    args.save = 'eval-{}-{}'.format(args.save, time.strftime("%Y%m%d-%H%M%S"))
+    args.save = '../../experiments/sota/penn/eval-{}-{}'.format(
+        args.save, time.strftime("%Y%m%d-%H%M%S"))
+    args.save += '-' + args.arch
     create_exp_dir(args.save, scripts_to_save=glob.glob('*.py'))
 
 log_format = '%(asctime)s %(message)s'
@@ -143,17 +145,18 @@ def evaluate(data_source, batch_size=10):
     total_loss = 0
     ntokens = len(corpus.dictionary)
     hidden = model.init_hidden(batch_size)
-    for i in range(0, data_source.size(0) - 1, args.bptt):
-        data, targets = get_batch(data_source, i, args, evaluation=True)
-        targets = targets.view(-1)
+    with torch.no_grad():
+        for i in range(0, data_source.size(0) - 1, args.bptt):
+            data, targets = get_batch(data_source, i, args, evaluation=True)
+            targets = targets.view(-1)
 
-        log_prob, hidden = parallel_model(data, hidden)
-        loss = nn.functional.nll_loss(log_prob.view(-1, log_prob.size(2)), targets).data
+            log_prob, hidden = parallel_model(data, hidden)
+            loss = nn.functional.nll_loss(log_prob.view(-1, log_prob.size(2)), targets).data
 
-        total_loss += loss * len(data)
+            total_loss += loss * len(data)
 
-        hidden = repackage_hidden(hidden)
-    return total_loss[0] / len(data_source)
+            hidden = repackage_hidden(hidden)
+    return total_loss.item() / len(data_source)
 
 
 def train():
@@ -207,17 +210,17 @@ def train():
             gc.collect()
 
         # `clip_grad_norm` helps prevent the exploding gradient problem in RNNs.
-        torch.nn.utils.clip_grad_norm(model.parameters(), args.clip)
+        torch.nn.utils.clip_grad_norm_(model.parameters(), args.clip)
         optimizer.step()
 
         # total_loss += raw_loss.data
         optimizer.param_groups[0]['lr'] = lr2
 
-        if np.isnan(total_loss[0]):
+        if np.isnan(total_loss.item()):
           raise
 
         if batch % args.log_interval == 0 and batch > 0:
-            cur_loss = total_loss[0] / args.log_interval
+            cur_loss = total_loss.item() / args.log_interval
             elapsed = time.time() - start_time
             logging.info('| epoch {:3d} | {:5d}/{:5d} batches | lr {:02.2f} | ms/batch {:5.2f} | '
                     'loss {:5.2f} | ppl {:8.2f}'.format(

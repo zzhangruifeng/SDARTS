@@ -34,3 +34,5 @@ DARTS_V2 = Genotype(recurrent=[('sigmoid', 0), ('relu', 1), ('relu', 1), ('ident
 
 DARTS = DARTS_V2
 
+penn_random = Genotype(recurrent=[('sigmoid', 0), ('sigmoid', 1), ('identity', 2), ('sigmoid', 1), ('tanh', 2), ('tanh', 2), ('sigmoid', 0), ('sigmoid', 3)], concat=range(1, 9))
+penn_pgd = Genotype(recurrent=[('relu', 0), ('relu', 1), ('tanh', 2), ('relu', 3), ('identity', 2), ('relu', 1), ('tanh', 2), ('relu', 7)], concat=range(1, 9))

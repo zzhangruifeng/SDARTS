@@ -2,10 +2,10 @@ import math
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from genotypes import STEPS
-from utils import mask2d
-from utils import LockedDropout
-from utils import embedded_dropout
+import sys
+sys.path.insert(0, '../../')
+from sota.rnn.genotypes import STEPS
+from sota.rnn.utils import mask2d, LockedDropout, embedded_dropout
 from torch.autograd import Variable
 
 INITRANGE = 0.04
@@ -27,7 +27,7 @@ class DARTSCell(nn.Module):
         nn.Parameter(torch.Tensor(nhid, 2*nhid).uniform_(-INITRANGE, INITRANGE)) for i in range(steps)
     ])
 
-  def forward(self, inputs, hidden):
+  def forward(self, inputs, hidden, updateType='alpha'):
     T, B = inputs.size(0), inputs.size(1)
 
     if self.training:
@@ -39,7 +39,7 @@ class DARTSCell(nn.Module):
     hidden = hidden[0]
     hiddens = []
     for t in range(T):
-      hidden = self.cell(inputs[t], hidden, x_mask, h_mask)
+      hidden = self.cell(inputs[t], hidden, x_mask, h_mask, updateType=updateType)
       hiddens.append(hidden)
     hiddens = torch.stack(hiddens)
     return hiddens, hiddens[-1].unsqueeze(0)
@@ -68,7 +68,7 @@ class DARTSCell(nn.Module):
       raise NotImplementedError
     return f
 
-  def cell(self, x, h_prev, x_mask, h_mask):
+  def cell(self, x, h_prev, x_mask, h_mask, updateType):
     s0 = self._compute_init_state(x, h_prev, x_mask, h_mask)
 
     states = [s0]
@@ -125,7 +125,7 @@ class RNNModel(nn.Module):
         self.decoder.bias.data.fill_(0)
         self.decoder.weight.data.uniform_(-INITRANGE, INITRANGE)
 
-    def forward(self, input, hidden, return_h=False):
+    def forward(self, input, hidden, return_h=False, updateType='alpha'):
         batch_size = input.size(1)
 
         emb = embedded_dropout(self.encoder, input, dropout=self.dropoute if self.training else 0)
@@ -137,7 +137,7 @@ class RNNModel(nn.Module):
         outputs = []
         for l, rnn in enumerate(self.rnns):
             current_input = raw_output
-            raw_output, new_h = rnn(raw_output, hidden[l])
+            raw_output, new_h = rnn(raw_output, hidden[l], updateType=updateType)
             new_hidden.append(new_h)
             raw_outputs.append(raw_output)
         hidden = new_hidden

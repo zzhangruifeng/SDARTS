@@ -1,5 +1,6 @@
 import argparse
 import os, sys, glob
+sys.path.insert(0, '../../')
 import time
 import math
 import numpy as np
@@ -8,17 +9,18 @@ import logging
 import torch.nn as nn
 import torch.nn.functional as F
 import torch.backends.cudnn as cudnn
-from architect import Architect
+from sota.rnn.architect import Architect
+import optimizers.darts.utils as utils
 
 import gc
 
-import data
-import model_search as model
-
-from utils import batchify, get_batch, repackage_hidden, create_exp_dir, save_checkpoint
+import sota.rnn.data as data
+import sota.rnn.model_search as model
+from sota.rnn.utils import batchify, get_batch, repackage_hidden, create_exp_dir, save_checkpoint
+from attacker.perturb import Random_alpha_RNN, Linf_PGD_alpha_RNN
 
 parser = argparse.ArgumentParser(description='PyTorch PennTreeBank/WikiText2 Language Model')
-parser.add_argument('--data', type=str, default='../data/penn/',
+parser.add_argument('--data', type=str, default='../../data/penn/',
                     help='location of the data corpus')
 parser.add_argument('--emsize', type=int, default=300,
                     help='size of word embeddings')
@@ -78,6 +80,10 @@ parser.add_argument('--arch_wdecay', type=float, default=1e-3,
                     help='weight decay for the architecture encoding alpha')
 parser.add_argument('--arch_lr', type=float, default=3e-3,
                     help='learning rate for the architecture encoding alpha')
+parser.add_argument('--perturb_alpha', type=str,
+                    default='none', help='perturb for alpha')
+parser.add_argument('--epsilon_alpha', type=float,
+                    default=0.3, help='max epsilon for alpha')
 args = parser.parse_args()
 
 if args.nhidlast < 0:
@@ -86,8 +92,16 @@ if args.small_batch_size < 0:
     args.small_batch_size = args.batch_size
 
 if not args.continue_train:
-    args.save = 'search-{}-{}'.format(args.save, time.strftime("%Y%m%d-%H%M%S"))
-    create_exp_dir(args.save, scripts_to_save=glob.glob('*.py'))
+    args.save = '../../experiments/sota/penn/search-{}-{}'.format(
+        args.save, time.strftime("%Y%m%d-%H%M%S"))
+    if args.unrolled:
+        args.save += '-unrolled'
+    if not args.perturb_alpha == 'none':
+        args.save += '-alpha-' + args.perturb_alpha + '-' + str(args.epsilon_alpha)
+    args.save += '-' + str(np.random.randint(10000))
+    utils.create_exp_dir(args.save, scripts_to_save=glob.glob('*.py'))
+
+
 
 log_format = '%(asctime)s %(message)s'
 logging.basicConfig(stream=sys.stdout, level=logging.INFO,
@@ -153,20 +167,21 @@ def evaluate(data_source, batch_size=10):
     total_loss = 0
     ntokens = len(corpus.dictionary)
     hidden = model.init_hidden(batch_size)
-    for i in range(0, data_source.size(0) - 1, args.bptt):
-        data, targets = get_batch(data_source, i, args, evaluation=True)
-        targets = targets.view(-1)
+    with torch.no_grad():
+        for i in range(0, data_source.size(0) - 1, args.bptt):
+            data, targets = get_batch(data_source, i, args, evaluation=True)
+            targets = targets.view(-1)
 
-        log_prob, hidden = parallel_model(data, hidden)
-        loss = nn.functional.nll_loss(log_prob.view(-1, log_prob.size(2)), targets).data
+            log_prob, hidden = parallel_model(data, hidden)
+            loss = nn.functional.nll_loss(log_prob.view(-1, log_prob.size(2)), targets).data
 
-        total_loss += loss * len(data)
+            total_loss += loss * len(data)
 
-        hidden = repackage_hidden(hidden)
-    return total_loss[0] / len(data_source)
+            hidden = repackage_hidden(hidden)
+    return total_loss.item() / len(data_source)
 
 
-def train():
+def train(perturb_alpha, epsilon_alpha):
     assert args.batch_size % args.small_batch_size == 0, 'batch_size must be divisible by small_batch_size'
 
     # Turn on training mode which enables dropout.
@@ -192,6 +207,7 @@ def train():
         data, targets = get_batch(train_data, i, args, seq_len=seq_len)
 
         optimizer.zero_grad()
+        architect.optimizer.zero_grad()
 
         start, end, s_id = 0, args.small_batch_size, 0
         while start < args.batch_size:
@@ -211,9 +227,21 @@ def train():
 
             # assuming small_batch_size = batch_size so we don't accumulate gradients
             optimizer.zero_grad()
+            architect.optimizer.zero_grad()
             hidden[s_id] = repackage_hidden(hidden[s_id])
 
-            log_prob, hidden[s_id], rnn_hs, dropped_rnn_hs = parallel_model(cur_data, hidden[s_id], return_h=True)
+            # print('before softmax', model.arch_parameters())
+            model.softmax_arch_parameters()
+
+            # print('before perturb', model.arch_parameters())
+            if perturb_alpha:
+                perturb_alpha(model, cur_data, cur_targets, hidden[s_id], epsilon_alpha)
+                optimizer.zero_grad()
+                architect.optimizer.zero_grad()
+            # print('after perturb', model.arch_parameters())
+
+            log_prob, hidden[s_id], rnn_hs, dropped_rnn_hs = parallel_model(
+                cur_data, hidden[s_id], return_h=True, updateType='weight')
             raw_loss = nn.functional.nll_loss(log_prob.view(-1, log_prob.size(2)), cur_targets)
 
             loss = raw_loss
@@ -232,16 +260,19 @@ def train():
 
             gc.collect()
 
-        # `clip_grad_norm` helps prevent the exploding gradient problem in RNNs.
-        torch.nn.utils.clip_grad_norm(model.parameters(), args.clip)
+        # `clip_grad_norm_` helps prevent the exploding gradient problem in RNNs.
+        torch.nn.utils.clip_grad_norm_(model.parameters(), args.clip)
         optimizer.step()
+        model.restore_arch_parameters()
+        # print('after restore', model.arch_parameters(), model.rnns[0].weights)
+        
 
         # total_loss += raw_loss.data
         optimizer.param_groups[0]['lr'] = lr2
         if batch % args.log_interval == 0 and batch > 0:
             logging.info(parallel_model.genotype())
             print(F.softmax(parallel_model.weights, dim=-1))
-            cur_loss = total_loss[0] / args.log_interval
+            cur_loss = total_loss.item() / args.log_interval
             elapsed = time.time() - start_time
             logging.info('| epoch {:3d} | {:5d}/{:5d} batches | lr {:02.2f} | ms/batch {:5.2f} | '
                     'loss {:5.2f} | ppl {:8.2f}'.format(
@@ -252,35 +283,50 @@ def train():
         batch += 1
         i += seq_len
 
-# Loop over epochs.
-lr = args.lr
-best_val_loss = []
-stored_loss = 100000000
 
-if args.continue_train:
-    optimizer_state = torch.load(os.path.join(args.save, 'optimizer.pt'))
-    if 't0' in optimizer_state['param_groups'][0]:
-        optimizer = torch.optim.ASGD(model.parameters(), lr=args.lr, t0=0, lambd=0., weight_decay=args.wdecay)
+if __name__ == '__main__':
+    # Loop over epochs.
+    lr = args.lr
+    best_val_loss = []
+    stored_loss = 100000000
+
+    if args.perturb_alpha == 'none':
+        perturb_alpha = None
+    elif args.perturb_alpha == 'pgd_linf':
+        perturb_alpha = Linf_PGD_alpha_RNN
+    elif args.perturb_alpha == 'random':
+        perturb_alpha = Random_alpha_RNN
+
+    if args.continue_train:
+        optimizer_state = torch.load(os.path.join(args.save, 'optimizer.pt'))
+        if 't0' in optimizer_state['param_groups'][0]:
+            optimizer = torch.optim.ASGD(model.parameters(), lr=args.lr, t0=0, lambd=0., weight_decay=args.wdecay)
+        else:
+            optimizer = torch.optim.SGD(model.parameters(), lr=args.lr, weight_decay=args.wdecay)
+        optimizer.load_state_dict(optimizer_state)
     else:
         optimizer = torch.optim.SGD(model.parameters(), lr=args.lr, weight_decay=args.wdecay)
-    optimizer.load_state_dict(optimizer_state)
-else:
-    optimizer = torch.optim.SGD(model.parameters(), lr=args.lr, weight_decay=args.wdecay)
 
-for epoch in range(1, args.epochs+1):
-    epoch_start_time = time.time()
-    train()
+    for epoch in range(1, args.epochs+1):
+        epoch_start_time = time.time()
 
-    val_loss = evaluate(val_data, eval_batch_size)
-    logging.info('-' * 89)
-    logging.info('| end of epoch {:3d} | time: {:5.2f}s | valid loss {:5.2f} | '
-            'valid ppl {:8.2f}'.format(epoch, (time.time() - epoch_start_time),
-                                       val_loss, math.exp(val_loss)))
-    logging.info('-' * 89)
+        if args.perturb_alpha:
+            epsilon_alpha = 0.03 + (args.epsilon_alpha - 0.03) * (epoch - 1) / args.epochs
+            logging.info('epoch %d epsilon_alpha %e', epoch, epsilon_alpha)
 
-    if val_loss < stored_loss:
-        save_checkpoint(model, optimizer, epoch, args.save)
-        logging.info('Saving Normal!')
-        stored_loss = val_loss
 
-    best_val_loss.append(val_loss)
+        train(perturb_alpha, epsilon_alpha)
+
+        val_loss = evaluate(val_data, eval_batch_size)
+        logging.info('-' * 89)
+        logging.info('| end of epoch {:3d} | time: {:5.2f}s | valid loss {:5.2f} | '
+                'valid ppl {:8.2f}'.format(epoch, (time.time() - epoch_start_time),
+                                        val_loss, math.exp(val_loss)))
+        logging.info('-' * 89)
+
+        if val_loss < stored_loss:
+            save_checkpoint(model, optimizer, epoch, args.save)
+            logging.info('Saving Normal!')
+            stored_loss = val_loss
+
+        best_val_loss.append(val_loss)

@@ -122,7 +122,7 @@ class BatchSentLoader(object):
         return self
 
 if __name__ == '__main__':
-    corpus = SentCorpus('../penn')
+    corpus = SentCorpus('../../data/penn')
     loader = BatchSentLoader(corpus.test, 10)
     for i, d in enumerate(loader):
         print(i, d.size())

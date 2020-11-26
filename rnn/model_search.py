@@ -1,10 +1,12 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from genotypes import PRIMITIVES, STEPS, CONCAT, Genotype
+import sys
+sys.path.insert(0, '../../')
+from sota.rnn.genotypes import PRIMITIVES, STEPS, CONCAT, Genotype
 from torch.autograd import Variable
 from collections import namedtuple
-from model import DARTSCell, RNNModel
+from sota.rnn.model import DARTSCell, RNNModel
 
 
 class DARTSCellSearch(DARTSCell):
@@ -13,10 +15,13 @@ class DARTSCellSearch(DARTSCell):
     super(DARTSCellSearch, self).__init__(ninp, nhid, dropouth, dropoutx, genotype=None)
     self.bn = nn.BatchNorm1d(nhid, affine=False)
 
-  def cell(self, x, h_prev, x_mask, h_mask):
+  def cell(self, x, h_prev, x_mask, h_mask, updateType='alpha'):
     s0 = self._compute_init_state(x, h_prev, x_mask, h_mask)
     s0 = self.bn(s0)
-    probs = F.softmax(self.weights, dim=-1)
+    if updateType == 'weight':
+      probs = self.weights
+    else:
+      probs = F.softmax(self.weights, dim=-1)
 
     offset = 0
     states = s0.unsqueeze(0)
@@ -66,9 +71,31 @@ class RNNModelSearch(RNNModel):
 
     def arch_parameters(self):
       return self._arch_parameters
+    
+    def _save_arch_parameters(self):
+      self._saved_arch_parameters = [p.clone() for p in self._arch_parameters]
 
-    def _loss(self, hidden, input, target):
-      log_prob, hidden_next = self(input, hidden, return_h=False)
+    def softmax_arch_parameters(self):
+      self._save_arch_parameters()
+      for p in self._arch_parameters:
+        p.data.copy_(F.softmax(p, dim=-1))
+    
+    def restore_arch_parameters(self):
+      for i, p in enumerate(self._arch_parameters):
+        p.data.copy_(self._saved_arch_parameters[i])
+      del self._saved_arch_parameters
+
+    def clip(self):
+      for p in self.arch_parameters():
+        for line in p:
+          max_index = line.argmax()
+          line.data.clamp_(0, 1)
+          if line.sum() == 0.0:
+            line.data[max_index] = 1.0
+          line.data.div_(line.sum())
+
+    def _loss(self, hidden, input, target, updateType='alpha'):
+      log_prob, hidden_next = self(input, hidden, return_h=False, updateType=updateType)
       loss = nn.functional.nll_loss(log_prob.view(-1, log_prob.size(2)), target)
       return loss, hidden_next
 

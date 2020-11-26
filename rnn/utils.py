@@ -3,11 +3,18 @@ import torch.nn as nn
 import os, shutil
 import numpy as np
 from torch.autograd import Variable
+import torch.nn.functional as F
 
 
 def repackage_hidden(h):
-    if type(h) == Variable:
-        return Variable(h.data)
+    # if isinstance(h, Variable):
+    #     return Variable(h.data)
+    # else:
+    #     return tuple(repackage_hidden(v) for v in h)
+    """Wraps hidden states in new Tensors,
+    to detach them from their history."""
+    if isinstance(h, torch.Tensor):
+        return h.detach()
     else:
         return tuple(repackage_hidden(v) for v in h)
 
@@ -31,9 +38,9 @@ def get_batch(source, i, args, seq_len=None, evaluation=False):
 
 def create_exp_dir(path, scripts_to_save=None):
     if not os.path.exists(path):
-        os.mkdir(path)
-
+        os.makedirs(path)
     print('Experiment dir : {}'.format(path))
+
     if scripts_to_save is not None:
         os.mkdir(os.path.join(path, 'scripts'))
         for script in scripts_to_save:
@@ -64,8 +71,14 @@ def embedded_dropout(embed, words, dropout=0.1, scale=None):
     padding_idx = embed.padding_idx
     if padding_idx is None:
         padding_idx = -1
-    X = embed._backend.Embedding.apply(words, masked_embed_weight,
-        padding_idx, embed.max_norm, embed.norm_type,
+    # X = embed._backend.Embedding.apply(words, masked_embed_weight,
+    #     padding_idx, embed.max_norm, embed.norm_type,
+    #     embed.scale_grad_by_freq, embed.sparse
+    # )
+    X = F.embedding(
+        words, masked_embed_weight,
+        padding_idx,
+        embed.max_norm, embed.norm_type,
         embed.scale_grad_by_freq, embed.sparse
     )
     return X
